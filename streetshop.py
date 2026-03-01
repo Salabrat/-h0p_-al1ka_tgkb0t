@@ -3329,8 +3329,14 @@ async def process_payment_method(callback: types.CallbackQuery):
         await callback.answer("Неверные данные")
         return
         
-    method = parts[2]
-    code = parts[3]
+    # callback_data format: pay_method_{method_id}_{code}
+    # method_id can contain underscores (e.g. sbp_phone), so we take code as last part
+    # and method_id as everything between prefix and code.
+    code = parts[-1]
+    method = "_".join(parts[2:-1])
+    if not method or not code:
+        await callback.answer("Неверные данные")
+        return
     
     print(f"Метод: {method}, Код: {code}")
 
@@ -6618,8 +6624,18 @@ async def order_payment_method_handler(callback: types.CallbackQuery):
     """Обработчик методов оплаты заказа"""
     try:
         parts = callback.data.split("_")
-        method = parts[2]
-        code = parts[3]
+        if len(parts) < 4:
+            await callback.answer("Неверные данные")
+            return
+
+        # callback_data format: order_pay_{method_id}_{code}
+        # method_id can contain underscores (e.g. sbp_phone), so we take code as last part
+        # and method_id as everything between prefix and code.
+        code = parts[-1]
+        method = "_".join(parts[2:-1])
+        if not method or not code:
+            await callback.answer("Неверные данные")
+            return
         
         order = await db.get_order(code)
         if not order:
