@@ -3034,13 +3034,9 @@ async def admin_reject_order_handler(callback: types.CallbackQuery):
         await callback.answer(f"Ошибка: {e}")
 
 # Заглушки для недоступных методов оплаты
-@dp.callback_query_handler(lambda c: c.data.startswith("pay_method_sbp_") or c.data.startswith("order_pay_sbp_"))
+@dp.callback_query_handler(lambda c: (c.data.startswith("pay_method_sbp_") or c.data.startswith("order_pay_sbp_") or c.data.startswith("pay_method_qr_") or c.data.startswith("order_pay_qr_")) and "_phone_" not in c.data)
 async def sbp_qr_stub_handler(callback: types.CallbackQuery):
     """Заглушка для СБП-QR (но не для phone!)"""
-    # Проверяем что это не pay_method_phone или order_pay_phone
-    if "_phone_" in callback.data:
-        return  # Пропускаем - пусть обработает основной обработчик
-    
     await callback.answer(
         "⚠️ СБП-QR пока что недоступна, выберите другой метод оплаты.",
         show_alert=True
