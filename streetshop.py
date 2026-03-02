@@ -1,4 +1,6 @@
 import os
+import csv
+import io
 import asyncio
 import logging
 import time
@@ -147,6 +149,58 @@ async def set_admin_commands_for_user(user_id: int):
     except Exception as e:
         print(f"⚠️ Ошибка установки команд для пользователя {user_id}: {e}")
         return False
+
+
+async def get_user_full_name(user_id: int) -> str:
+    """Получает ФИО пользователя через Telegram API"""
+    try:
+        chat = await bot.get_chat(user_id)
+        full_name = getattr(chat, "full_name", None)
+        if full_name:
+            return full_name
+        parts = []
+        first_name = getattr(chat, "first_name", None)
+        last_name = getattr(chat, "last_name", None)
+        if first_name:
+            parts.append(first_name)
+        if last_name:
+            parts.append(last_name)
+        return " ".join(parts).strip() or "—"
+    except Exception as e:
+        print(f"⚠️ Не удалось получить ФИО пользователя {user_id}: {e}")
+        return "—"
+
+
+async def notify_admins_user_joined(user: types.User):
+    """Отправляет уведомление администраторам о новом пользователе"""
+    try:
+        if db.conn is None:
+            await db.connect()
+        admins = await db.get_all_admins()
+        admin_ids = [admin[0] for admin in admins]
+    except Exception as e:
+        print(f"⚠️ Не удалось получить список админов для уведомления о новом пользователе: {e}")
+        admin_ids = [cfg.ADMIN_ID] if cfg.ADMIN_ID else []
+
+    if not admin_ids:
+        return
+
+    username_display = f"@{user.username}" if getattr(user, "username", None) else "—"
+    full_name = user.full_name or "—"
+    join_time = datetime.now().strftime('%d.%m.%Y %H:%M:%S')
+    text = (
+        "🆕 <b>Новый пользователь</b>\n\n"
+        f"👤 ФИО: {full_name}\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"📛 Username: {username_display}\n"
+        f"🕒 Время: {join_time}"
+    )
+
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            print(f"⚠️ Не удалось отправить уведомление админу {admin_id}: {e}")
 
 class TelegramLogHandler(logging.Handler):
     """Кастомный обработчик логов, который отправляет сообщения админам в Telegram"""
@@ -2483,6 +2537,14 @@ async def check_order_expiration():
 async def send_welcome(message: types.Message):
     print(f"Получена команда /start с параметрами: {message.text}")
 
+    is_new_user = False
+    try:
+        created = await db.ensure_user_exists(message.from_user.id, message.from_user.username)
+        # ensure_user_exists возвращает True, если пользователь создан только что
+        is_new_user = created
+    except Exception as e:
+        print(f"⚠️ Не удалось сохранить пользователя при /start: {e}")
+
     # Handle deep linking for products
     if message.text and len(message.text.split()) > 1:
         param = message.text.split()[1]
@@ -2605,20 +2667,8 @@ async def send_welcome(message: types.Message):
     welcome_sticker_id = welcome_settings.get('sticker_id')
     welcome_photo_id = welcome_settings.get('photo_id')
 
-    # Отправляем стикер если он установлен
-    if welcome_sticker_id:
-        try:
-            await bot.send_sticker(
-                chat_id=message.chat.id,
-                sticker=welcome_sticker_id
-            )
-        except Exception as e:
-            print(f"Ошибка отправки стикера: {e}")
-
-    # Отправляем фото или используем стандартное
     try:
-        if welcome_photo_id and is_valid_telegram_file_id(welcome_photo_id):
-            # Проверяем, что ID фото валидный
+        if welcome_sticker_id:
             try:
                 # Используем фото из БД
                 await bot.send_photo(
@@ -2632,7 +2682,6 @@ async def send_welcome(message: types.Message):
                 print(f"Ошибка отправки фото из БД: {photo_error}")
                 # Если фото из БД не работает, сбрасываем его и используем стандартное
                 await db.set_bot_setting("welcome_photo_id", None)
-                # Используем стандартное фото из файла
                 with open(cfg.IMAGE_PATH, 'rb') as photo:
                     await bot.send_photo(
                         chat_id=message.chat.id,
@@ -2646,7 +2695,7 @@ async def send_welcome(message: types.Message):
             if welcome_photo_id and not is_valid_telegram_file_id(welcome_photo_id):
                 print(f"Невалидный photo_id: {welcome_photo_id}. Сбрасываем на стандартное.")
                 await db.set_bot_setting("welcome_photo_id", None)
-            
+
             # Используем стандартное фото из файла
             with open(cfg.IMAGE_PATH, 'rb') as photo:
                 await bot.send_photo(
@@ -2671,6 +2720,9 @@ async def send_welcome(message: types.Message):
             parse_mode="HTML",
             reply_markup=main_menu_kb()
         )
+
+    if is_new_user:
+        await notify_admins_user_joined(message.from_user)
 
 
 @dp.message_handler(lambda message: message.text and message.text == "🏪 Каталог товаров")
@@ -8914,6 +8966,80 @@ async def send_command_handler(message: types.Message):
         "📢 Рассылка сообщений\n\nВыберите тип рассылки:",
         reply_markup=broadcast_main_kb()
     )
+
+
+@dp.message_handler(lambda message: message.text and message.text.startswith("/mmnt"))
+async def mmnt_command_handler(message: types.Message):
+    """Отправляет файл со всеми пользователями (username, ID, ФИО)"""
+    if not await is_user_admin(message.from_user.id):
+        return
+
+    status_message = await message.answer("📄 Формирую список пользователей, пожалуйста подождите…")
+
+    try:
+        if db.conn is None:
+            await db.connect()
+
+        users = await db.get_all_users()
+
+        if not users:
+            await status_message.edit_text("ℹ️ В базе пока нет пользователей")
+            return
+
+        user_rows = []
+        for user_id, username in users:
+            full_name = await get_user_full_name(user_id)
+            user_rows.append({
+                "user_id": user_id,
+                "username": username or "—",
+                "full_name": full_name
+            })
+
+        # Формируем CSV (Excel-friendly) файл
+        csv_buffer = io.StringIO()
+        csv_writer = csv.writer(csv_buffer, delimiter=';')
+        csv_writer.writerow(["№", "User ID", "@username", "ФИО"])
+        for idx, row in enumerate(user_rows, start=1):
+            csv_writer.writerow([
+                idx,
+                row["user_id"],
+                f"@{row['username']}" if row['username'] != "—" and not row['username'].startswith("@") else row['username'],
+                row["full_name"]
+            ])
+
+        csv_bytes = io.BytesIO()
+        csv_bytes.write(csv_buffer.getvalue().encode('utf-8-sig'))
+        csv_bytes.seek(0)
+
+        # Формируем TXT файл
+        txt_lines = []
+        for idx, row in enumerate(user_rows, start=1):
+            username_display = row['username']
+            if username_display != "—" and not username_display.startswith("@"):
+                username_display = f"@{username_display}"
+            txt_lines.append(
+                f"{idx}. {username_display} | ID: {row['user_id']} | ФИО: {row['full_name']}"
+            )
+
+        txt_bytes = io.BytesIO("\n".join(txt_lines).encode('utf-8'))
+        txt_bytes.seek(0)
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        total_users = len(user_rows)
+
+        await message.answer_document(
+            document=types.InputFile(csv_bytes, filename=f"mmnt_users_{timestamp}.csv"),
+            caption=f"📊 Excel-файл пользователей (всего: {total_users})"
+        )
+        await message.answer_document(
+            document=types.InputFile(txt_bytes, filename=f"mmnt_users_{timestamp}.txt"),
+            caption="📄 TXT-файл со списком пользователей"
+        )
+
+        await status_message.edit_text("✅ Файлы со списком пользователей отправлены")
+
+    except Exception as e:
+        await status_message.edit_text(f"❌ Ошибка формирования списка: {e}")
 
 @dp.message_handler(lambda message: message.text and message.text.startswith("/cards"))
 async def cards_command_handler(message: types.Message):
