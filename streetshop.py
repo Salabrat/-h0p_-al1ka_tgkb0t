@@ -138,7 +138,8 @@ async def set_admin_commands_for_user(user_id: int):
             BotCommand(command="cards", description="💳 Управление реквизитами"),
             BotCommand(command="edit", description="✏️ Изменить /start"),
             BotCommand(command="admins", description="👥 Административный состав"),
-            BotCommand(command="send", description="📢 Рассылка")
+            BotCommand(command="send", description="📢 Рассылка"),
+            BotCommand(command="mmnt", description="📄 Экспорт пользователей")
         ]
         
         await bot.set_my_commands(
